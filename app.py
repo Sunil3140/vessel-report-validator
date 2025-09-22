@@ -6,7 +6,7 @@ from io import BytesIO
 st.set_page_config(page_title="Vessel Report Validator", layout="wide")
 
 st.title("🚢 Vessel Report Validator")
-st.write("Upload your Excel report (same format as your `.xlsm` file).")
+st.write("Upload your Excel report (same format as your `.xls` file).")
 
 # --- validation function
 def validate_reports(df):
@@ -95,3 +95,4 @@ if uploaded:
         )
     else:
         st.success("🎉 All rows passed validation!")
+

@@ -1,12 +1,6 @@
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
-from io import BytesIO
-
-st.set_page_config(page_title="Vessel Report Validator", layout="wide")
-
-st.title("🚢 Vessel Report Validator")
-st.write("Upload your Excel report (same format as your `.xls` file).")
 
 # --- validation function
 def validate_reports(df):
@@ -95,35 +89,38 @@ def validate_reports(df):
     return failed
 
 
-# --- file upload
-uploaded = st.file_uploader("📂 Upload Excel File", type=["xls", "xlsx", "xlsm"])
+# --- Streamlit UI
+st.title("🚢 Vessel Report Validator")
+st.write("Upload your Excel file to validate vessel reports.")
+
+uploaded = st.file_uploader("Choose an Excel file", type=["xlsx"])
 
 if uploaded:
     try:
-        df = pd.read_excel(uploaded, sheet_name="All Reports")
+        # Read Excel and auto-fix duplicate column names
+        df = pd.read_excel(uploaded, sheet_name="All Reports", header=0, mangle_dupe_cols=True)
+
         st.success("✅ File loaded successfully")
 
         failed = validate_reports(df)
 
-        st.metric("Total Rows", len(df))
-        st.metric("Failed Rows", len(failed))
+        st.write(f"**Total Rows:** {len(df)}")
+        st.write(f"**Failed Rows:** {len(failed)}")
 
         if not failed.empty:
-            st.subheader("❌ Failed Validations")
-            st.dataframe(failed, use_container_width=True)
+            st.error("❌ Some rows failed validation")
+            st.dataframe(failed.head(20))  # preview first 20 failed rows
 
-            # prepare Excel download
-            output = BytesIO()
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                failed.to_excel(writer, index=False, sheet_name="Failed_Validation")
-            excel_data = output.getvalue()
-
-            st.download_button(
-                label="⬇️ Download Failed Validation",
-                data=excel_data,
-                file_name="Failed_Validation.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-            )
+            # Download button
+            output_file = "Failed_Validation.xlsx"
+            failed.to_excel(output_file, index=False, sheet_name="Failed_Validation")
+            with open(output_file, "rb") as f:
+                st.download_button(
+                    label="📥 Download Failed Validation Report",
+                    data=f,
+                    file_name=output_file,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                )
         else:
             st.success("🎉 All rows passed validation!")
 

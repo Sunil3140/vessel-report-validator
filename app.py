@@ -6,7 +6,7 @@ from io import BytesIO
 st.set_page_config(page_title="Vessel Report Validator", layout="wide")
 
 st.title("🚢 Vessel Report Validator")
-st.write("Upload your Excel report (same format as your `.xlsm` file).")
+st.write("Upload your Excel report (same format as your `.xls` file).")
 
 # --- validation function
 def validate_reports(df):
@@ -55,6 +55,10 @@ def validate_reports(df):
         if ME_Rhrs >= 25:
             reason.append("ME Rhrs >= 25")
 
+        # --- Rule 5: Fuel Oil Pressure 6–8 bar
+        if not (6 <= fuel_pr <= 8):
+            reason.append("Fuel Oil Pressure out of 6–8 bar")
+
         reasons.append("; ".join(reason))
 
     df["Reason"] = reasons
@@ -91,4 +95,3 @@ if uploaded:
         )
     else:
         st.success("🎉 All rows passed validation!")
-

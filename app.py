@@ -1,41 +1,38 @@
 import pandas as pd
 import numpy as np
-import streamlit as st
-from io import BytesIO
-
-st.set_page_config(page_title="Vessel Report Validator", layout="wide")
-
-st.title("🚢 Vessel Report Validator")
-st.write("Upload your Excel report (same format as your `.xls` file).")
-
+ 
 # --- validation function
 def validate_reports(df):
     reasons = []
-
+    fail_columns = set()   # keep track of which columns failed
+ 
     for idx, row in df.iterrows():
         reason = []
         report_type = str(row.get("Report Type", "")).strip()
         ME_Rhrs = row.get("ME Rhrs (From Last Report)", 0)
         sfoc = row.get("SFOC", 0)
         avg_speed = row.get("Avg. Speed", 0)
-        fuel_pr = row.get("Fuel Oil. Pr. [bar]", 0)
-
+ 
         # --- Rule 1: SFOC
         if report_type == "At Sea" and ME_Rhrs > 12:
             if not (150 <= sfoc <= 200):
                 reason.append("SFOC out of 150–200 at sea with ME Rhrs > 12")
+                fail_columns.add("SFOC")
         elif report_type in ["At Port", "At Anchorage"]:
             if sfoc != 0:
                 reason.append("SFOC not 0 at port/anchorage")
-
+                fail_columns.add("SFOC")
+ 
         # --- Rule 2: Avg Speed
         if report_type == "At Sea" and ME_Rhrs > 12:
             if not (0 <= avg_speed <= 20):
                 reason.append("Avg. Speed out of 0–20 at sea with ME Rhrs > 12")
+                fail_columns.add("Avg. Speed")
         elif report_type == "At Port":
             if avg_speed != 0:
                 reason.append("Avg. Speed not 0 at port")
-
+                fail_columns.add("Avg. Speed")
+ 
         # --- Rule 3: Exhaust Temp deviation (Units 1–16)
         if report_type == "At Sea" and ME_Rhrs > 12:
             exhaust_cols = [
@@ -50,48 +47,63 @@ def validate_reports(df):
                     val = row[c]
                     if pd.notna(val) and val != 0 and abs(val - avg_temp) > 50:
                         reason.append(f"Exhaust temp deviation > ±50 from avg at Unit {j}")
-
+                        fail_columns.add(c)
+ 
         # --- Rule 4: ME Rhrs always < 25
         if ME_Rhrs >= 25:
             reason.append("ME Rhrs >= 25")
-
-        # --- Rule 5: Fuel Oil Pressure 6–8 bar
-        if not (6 <= fuel_pr <= 8):
-            reason.append("Fuel Oil Pressure out of 6–8 bar")
-
+            fail_columns.add("ME Rhrs (From Last Report)")
+ 
         reasons.append("; ".join(reason))
-
+ 
     df["Reason"] = reasons
     failed = df[df["Reason"] != ""].copy()
+ 
+    # Always keep these context columns in this order
+    context_cols = [
+        "IMO_No",
+        "Report Type",
+        "Start Date",
+        "Start Time",
+        "End Date",
+        "End Time",
+        "Voyage Number",
+        "Time Zone",
+        "Distance - Ground [NM]",
+        "Time Shift",
+        "Distance - Sea [NM]",
+        "Average Load [kW]",
+        "Average RPM",
+        "Average Load [%]",
+        "ME Rhrs (From Last Report)",
+    ]
+ 
+    cols_to_keep = context_cols + list(fail_columns) + ["Reason"]
+ 
+    # Filter only existing columns
+    cols_to_keep = [c for c in cols_to_keep if c in failed.columns]
+ 
+    failed = failed[cols_to_keep]
+ 
     return failed
-
-# --- file upload
-uploaded = st.file_uploader("📂 Upload Excel File", type=["xls", "xlsx", "xlsm"])
-
-if uploaded:
-    df = pd.read_excel(uploaded, sheet_name="All Reports")
-    st.write("✅ File loaded successfully")
-
+ 
+ 
+if __name__ == "__main__":
+    file_path = "weekly-data-dump_13-Sep-25_20-Sep-25.xlsx"
+ 
+    df = pd.read_excel(file_path, sheet_name="All Reports")
+    print("✅ File loaded successfully")
+ 
     failed = validate_reports(df)
-
-    st.metric("Total Rows", len(df))
-    st.metric("Failed Rows", len(failed))
-
-    if len(failed) > 0:
-        st.subheader("❌ Failed Validations")
-        st.dataframe(failed, use_container_width=True)
-
-        # prepare Excel download
-        output = BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            failed.to_excel(writer, index=False, sheet_name="Failed_Validation")
-        excel_data = output.getvalue()
-
-        st.download_button(
-            label="⬇️ Download Failed Validation",
-            data=excel_data,
-            file_name="Failed_Validation.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+ 
+    print(f"Total Rows: {len(df)}")
+    print(f"Failed Rows: {len(failed)}")
+ 
+    if not failed.empty:
+        output_file = "Failed_Validation.xlsx"
+        failed.to_excel(output_file, index=False, sheet_name="Failed_Validation")
+        print(f"❌ Some rows failed validation. Saved to {output_file}")
+        print("\n--- Failed Rows Preview ---")
+        print(failed.head(10))  # print first 10 failed rows in console
     else:
-        st.success("🎉 All rows passed validation!")
+        print("🎉 All rows passed validation!")

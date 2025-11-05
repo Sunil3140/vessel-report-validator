@@ -121,15 +121,23 @@ def validate_reports(df):
         "ME Rhrs (From Last Report)",
     ]
 
+    # Combine all columns and remove duplicates while preserving order
     cols_to_keep = context_cols + exhaust_cols + list(fail_columns) + ["Reason"]
-    cols_to_keep = [c for c in cols_to_keep if c in failed.columns]
-
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    cols_to_keep_unique = []
+    for col in cols_to_keep:
+        if col not in seen and col in failed.columns:
+            seen.add(col)
+            cols_to_keep_unique.append(col)
+    
     # Move Ship Name to Column A
-    if "Ship Name" in cols_to_keep:
-        cols_to_keep.remove("Ship Name")
-        cols_to_keep = ["Ship Name"] + cols_to_keep
+    if "Ship Name" in cols_to_keep_unique:
+        cols_to_keep_unique.remove("Ship Name")
+        cols_to_keep_unique = ["Ship Name"] + cols_to_keep_unique
 
-    failed = failed[cols_to_keep]
+    failed = failed[cols_to_keep_unique]
 
     return failed, df
 

@@ -7,67 +7,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from datetime import datetime, timedelta
-
-def calculate_report_hours(df):
-    """Calculate Report Hours from Start Date/Time, End Date/Time and Time Shift"""
-    report_hours = []
-    
-    for idx, row in df.iterrows():
-        try:
-            # Get date and time components
-            start_date = pd.to_datetime(row.get("Start Date"), errors='coerce')
-            end_date = pd.to_datetime(row.get("End Date"), errors='coerce')
-            
-            # Get time components (handle various formats)
-            start_time = str(row.get("Start Time", "00:00:00")).strip()
-            end_time = str(row.get("End Time", "00:00:00")).strip()
-            
-            # Handle time shift (convert to hours)
-            time_shift = row.get("Time Shift", 0)
-            if pd.isna(time_shift):
-                time_shift = 0
-            else:
-                time_shift = float(time_shift)
-            
-            # Create datetime objects
-            if pd.notna(start_date) and pd.notna(end_date):
-                # Parse time strings
-                try:
-                    start_time_obj = pd.to_datetime(start_time, format='%H:%M:%S').time()
-                except:
-                    try:
-                        start_time_obj = pd.to_datetime(start_time, format='%H:%M').time()
-                    except:
-                        start_time_obj = datetime.strptime("00:00:00", '%H:%M:%S').time()
-                
-                try:
-                    end_time_obj = pd.to_datetime(end_time, format='%H:%M:%S').time()
-                except:
-                    try:
-                        end_time_obj = pd.to_datetime(end_time, format='%H:%M').time()
-                    except:
-                        end_time_obj = datetime.strptime("00:00:00", '%H:%M:%S').time()
-                
-                # Combine date and time
-                start_datetime = datetime.combine(start_date.date(), start_time_obj)
-                end_datetime = datetime.combine(end_date.date(), end_time_obj)
-                
-                # Calculate time difference
-                time_diff = end_datetime - start_datetime
-                hours_diff = time_diff.total_seconds() / 3600
-                
-                # Add time shift
-                total_hours = hours_diff + time_shift
-                
-                report_hours.append(round(total_hours, 2))
-            else:
-                report_hours.append(0)
-                
-        except Exception as e:
-            report_hours.append(0)
-    
-    return report_hours
+from datetime import datetime
 
 def validate_reports(df):
     """Validate ship reports and return failed rows with reasons"""
@@ -79,8 +19,7 @@ def validate_reports(df):
         "Avg. Speed",
         "Fuel Cons. [MT] (ME Cons 1)",
         "Fuel Cons. [MT] (ME Cons 2)",
-        "Fuel Cons. [MT] (ME Cons 3)",
-        "Time Shift"
+        "Fuel Cons. [MT] (ME Cons 3)"
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -92,9 +31,6 @@ def validate_reports(df):
                 .replace(["", "nan", "None"], np.nan)
             )
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
-    # --- Calculate Report Hours ---
-    df["Report Hours"] = calculate_report_hours(df)
 
     # --- Calculate SFOC in g/kWh ---
     df["SFOC"] = (
@@ -116,27 +52,26 @@ def validate_reports(df):
         reason = []
         report_type = str(row.get("Report Type", "")).strip()
         ME_Rhrs = row.get("ME Rhrs (From Last Report)", 0)
-        report_hours = row.get("Report Hours", 0)
         sfoc = row.get("SFOC", 0)
         avg_speed = row.get("Avg. Speed", 0)
 
-        # --- Rule 1: SFOC (only for At Sea) ---
+        # --- Rule 1: SFOC (removed at port/anchorage validation) ---
         if report_type == "At Sea" and ME_Rhrs > 12:
             if not (150 <= sfoc <= 200):
                 reason.append("SFOC out of 150–200 at sea with ME Rhrs > 12")
                 fail_columns.add("SFOC")
-        elif report_type == "At Anchorage":
-            if abs(sfoc) > 0.0001:
-                reason.append("SFOC not 0 at anchorage")
-                fail_columns.add("SFOC")
 
-        # --- Rule 2: Avg Speed (only for At Sea) ---
+        # --- Rule 2: Avg Speed ---
         if report_type == "At Sea" and ME_Rhrs > 12:
             if not (0 <= avg_speed <= 20):
                 reason.append("Avg. Speed out of 0–20 at sea with ME Rhrs > 12")
                 fail_columns.add("Avg. Speed")
+        elif report_type == "At Port":
+            if abs(avg_speed) > 0.0001:
+                reason.append("Avg. Speed not 0 at port")
+                fail_columns.add("Avg. Speed")
 
-        # --- Rule 3: Exhaust Temp deviation (Units 1–16, only At Sea) ---
+        # --- Rule 3: Exhaust Temp deviation (Units 1–16) ---
         if report_type == "At Sea" and ME_Rhrs > 12:
             exhaust_cols = [
                 f"Exh. Temp [°C] (Main Engine Unit {j})"
@@ -152,11 +87,10 @@ def validate_reports(df):
                         reason.append(f"Exhaust temp deviation > ±50 from avg at Unit {j}")
                         fail_columns.add(c)
 
-        # --- Rule 4: ME Rhrs should not be greater than Report Hours ---
-        if report_hours > 0 and ME_Rhrs > report_hours:
-            reason.append(f"ME Rhrs ({ME_Rhrs:.2f}) > Report Hours ({report_hours:.2f})")
+        # --- Rule 4: ME Rhrs always < 25 ---
+        if ME_Rhrs > 25:
+            reason.append("ME Rhrs > 25")
             fail_columns.add("ME Rhrs (From Last Report)")
-            fail_columns.add("Report Hours")
 
         reasons.append("; ".join(reason))
 
@@ -187,7 +121,6 @@ def validate_reports(df):
         "Average RPM",
         "Average Load [%]",
         "ME Rhrs (From Last Report)",
-        "Report Hours",
     ]
 
     # Combine all columns and remove duplicates while preserving order
@@ -278,10 +211,10 @@ def create_email_body(ship_name, failed_count, reasons_summary):
             
             <p style="color: #7f8c8d; font-size: 0.9em;">
                 <strong>Validation Rules Reference:</strong><br>
-                • SFOC: 150-200 g/kWh at sea (ME Rhrs > 12), 0 at anchorage<br>
-                • Speed: 0-20 knots at sea (ME Rhrs > 12)<br>
-                • Exhaust Temp: Deviation ≤ ±50°C from average (at sea)<br>
-                • ME Rhrs: Must not exceed Report Hours
+                • SFOC: 150-200 g/kWh at sea (ME Rhrs > 12)<br>
+                • Speed: 0-20 knots at sea (ME Rhrs > 12), 0 at port<br>
+                • Exhaust Temp: Deviation ≤ ±50°C from average<br>
+                • ME Rhrs: Must be < 25 hours
             </p>
             
             <p style="color: #7f8c8d; font-size: 0.85em; margin-top: 30px;">
@@ -309,23 +242,17 @@ def main():
         st.markdown("""
         **Rule 1: SFOC (Specific Fuel Oil Consumption)**
         - At Sea (ME Rhrs > 12): 150–200 g/kWh
-        - At Anchorage: Must be 0
-        - At Port: No validation
         
         **Rule 2: Average Speed**
         - At Sea (ME Rhrs > 12): 0–20 knots
-        - At Port/Anchorage: No validation
+        - At Port: Must be 0
         
         **Rule 3: Exhaust Temperature**
-        - At Sea (ME Rhrs > 12): Deviation ≤ ±50°C from average
+        - Deviation must be ≤ ±50°C from average
         - Applies to Units 1-16
-        - At Port/Anchorage: No validation
         
         **Rule 4: ME Running Hours**
-        - ME Rhrs must not exceed Report Hours
-        
-        **Report Hours Calculation**
-        - Calculated as: (End Date/Time - Start Date/Time) + Time Shift
+        - Must be < 25 hours
         """)
         
         st.divider()
@@ -363,7 +290,7 @@ def main():
             
             # Validate reports
             with st.spinner("Validating reports..."):
-                failed, df_with_calcs = validate_reports(df.copy())
+                failed, df_with_sfoc = validate_reports(df.copy())
             
             # Display results
             st.header("📈 Validation Results")
@@ -566,20 +493,20 @@ def main():
                 st.success("🎉 All reports passed validation!")
                 st.balloons()
             
-            # Option to view all data with SFOC and Report Hours
-            with st.expander("🔍 View All Data (with calculated SFOC and Report Hours)"):
-                st.dataframe(df_with_calcs, use_container_width=True, height=400)
+            # Option to view all data with SFOC
+            with st.expander("🔍 View All Data (with calculated SFOC)"):
+                st.dataframe(df_with_sfoc, use_container_width=True, height=400)
                 
                 # Download all data
                 output_all = io.BytesIO()
                 with pd.ExcelWriter(output_all, engine='openpyxl') as writer:
-                    df_with_calcs.to_excel(writer, index=False, sheet_name="All_Reports_Processed")
+                    df_with_sfoc.to_excel(writer, index=False, sheet_name="All_Reports_With_SFOC")
                 output_all.seek(0)
                 
                 st.download_button(
-                    label="📥 Download All Data with Calculations",
+                    label="📥 Download All Data with SFOC",
                     data=output_all,
-                    file_name="All_Reports_With_Calculations.xlsx",
+                    file_name="All_Reports_With_SFOC.xlsx",
                     mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
                 )
                 
@@ -590,12 +517,12 @@ def main():
         st.info("👆 Please upload an Excel file to begin validation")
         
         # Show sample data structure
-        with st.expander("📄 Expected Data Structure"):
+        with st.expander("🔍 Expected Data Structure"):
             st.markdown("""
             **Main Excel File** should contain a sheet named **"All Reports"** with columns:
             
             - Ship Name, IMO_No, Report Type (At Sea / At Port / At Anchorage)
-            - Start Date, Start Time, End Date, End Time, Time Shift
+            - Start Date, Start Time, End Date, End Time
             - Average Load [kW], ME Rhrs (From Last Report), Avg. Speed
             - Fuel Cons. [MT] (ME Cons 1, 2, 3)
             - Exh. Temp [°C] (Main Engine Unit 1-16)

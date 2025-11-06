@@ -116,6 +116,7 @@ def validate_reports(df):
         reason = []
         report_type = str(row.get("Report Type", "")).strip()
         ME_Rhrs = row.get("ME Rhrs (From Last Report)", 0)
+        report_hours = row.get("Report Hours", 0)
         sfoc = row.get("SFOC", 0)
         avg_speed = row.get("Avg. Speed", 0)
 
@@ -151,10 +152,11 @@ def validate_reports(df):
                         reason.append(f"Exhaust temp deviation > ±50 from avg at Unit {j}")
                         fail_columns.add(c)
 
-        # --- Rule 4: ME Rhrs always < 25 ---
-        if ME_Rhrs > 25:
-            reason.append("ME Rhrs > 25")
+        # --- Rule 4: ME Rhrs should not be greater than Report Hours ---
+        if report_hours > 0 and ME_Rhrs > report_hours:
+            reason.append(f"ME Rhrs ({ME_Rhrs:.2f}) > Report Hours ({report_hours:.2f})")
             fail_columns.add("ME Rhrs (From Last Report)")
+            fail_columns.add("Report Hours")
 
         reasons.append("; ".join(reason))
 
@@ -279,7 +281,7 @@ def create_email_body(ship_name, failed_count, reasons_summary):
                 • SFOC: 150-200 g/kWh at sea (ME Rhrs > 12), 0 at anchorage<br>
                 • Speed: 0-20 knots at sea (ME Rhrs > 12)<br>
                 • Exhaust Temp: Deviation ≤ ±50°C from average (at sea)<br>
-                • ME Rhrs: Must be < 25 hours
+                • ME Rhrs: Must not exceed Report Hours
             </p>
             
             <p style="color: #7f8c8d; font-size: 0.85em; margin-top: 30px;">
@@ -320,7 +322,7 @@ def main():
         - At Port/Anchorage: No validation
         
         **Rule 4: ME Running Hours**
-        - Must be < 25 hours (all report types)
+        - ME Rhrs must not exceed Report Hours
         
         **Report Hours Calculation**
         - Calculated as: (End Date/Time - Start Date/Time) + Time Shift

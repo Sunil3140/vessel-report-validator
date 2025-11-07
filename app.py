@@ -3,47 +3,95 @@ import pandas as pd
 import numpy as np
 import io
 import smtplib
-import traceback
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
-from datetime import datetime
+from datetime import datetime, timedelta
 
-# ---------------------- Report Hours Calculation ----------------------
+@st.cache_data
 def calculate_report_hours(df):
+    """Calculate Report Hours from Start Date/Time, End Date/Time and Time Shift"""
+    df = df.copy()
     report_hours = []
-    for _, row in df.iterrows():
+    
+    for idx, row in df.iterrows():
         try:
-            start_date = pd.to_datetime(row.get("Start Date"), errors="coerce")
-            end_date = pd.to_datetime(row.get("End Date"), errors="coerce")
+            # Get date and time components
+            start_date = pd.to_datetime(row.get("Start Date"), errors='coerce')
+            end_date = pd.to_datetime(row.get("End Date"), errors='coerce')
+            
+            # Get time components (handle various formats)
             start_time = str(row.get("Start Time", "00:00:00")).strip()
             end_time = str(row.get("End Time", "00:00:00")).strip()
-            time_shift = row.get("Time Shift", 0) or 0
-
+            
+            # Handle time shift (convert to hours)
+            time_shift = row.get("Time Shift", 0)
+            if pd.isna(time_shift):
+                time_shift = 0
+            else:
+                time_shift = float(time_shift)
+            
+            # Create datetime objects
             if pd.notna(start_date) and pd.notna(end_date):
-                start_dt = pd.to_datetime(f"{start_date.date()} {start_time}", errors="coerce")
-                end_dt = pd.to_datetime(f"{end_date.date()} {end_time}", errors="coerce")
-                total_hours = (end_dt - start_dt).total_seconds() / 3600 + float(time_shift)
+                # Parse time strings
+                try:
+                    start_time_obj = pd.to_datetime(start_time, format='%H:%M:%S').time()
+                except:
+                    try:
+                        start_time_obj = pd.to_datetime(start_time, format='%H:%M').time()
+                    except:
+                        start_time_obj = datetime.strptime("00:00:00", '%H:%M:%S').time()
+                
+                try:
+                    end_time_obj = pd.to_datetime(end_time, format='%H:%M:%S').time()
+                except:
+                    try:
+                        end_time_obj = pd.to_datetime(end_time, format='%H:%M').time()
+                    except:
+                        end_time_obj = datetime.strptime("00:00:00", '%H:%M:%S').time()
+                
+                # Combine date and time
+                start_datetime = datetime.combine(start_date.date(), start_time_obj)
+                end_datetime = datetime.combine(end_date.date(), end_time_obj)
+                
+                # Calculate time difference
+                time_diff = end_datetime - start_datetime
+                hours_diff = time_diff.total_seconds() / 3600
+                
+                # Add time shift
+                total_hours = hours_diff + time_shift
+                
                 report_hours.append(round(total_hours, 2))
             else:
                 report_hours.append(0)
-        except Exception:
+                
+        except Exception as e:
             report_hours.append(0)
+    
     return report_hours
 
-
-# ---------------------- Aux Engine Validation ----------------------
-def apply_aux_engine_rule(df):
-    ae_cols = [
+@st.cache_data
+def validate_reports(df):
+    """Validate ship reports and return failed rows with reasons"""
+    df = df.copy()
+    
+    # --- Clean numeric columns ---
+    numeric_cols = [
+        "Average Load [kW]",
+        "ME Rhrs (From Last Report)",
+        "Avg. Speed",
+        "Fuel Cons. [MT] (ME Cons 1)",
+        "Fuel Cons. [MT] (ME Cons 2)",
+        "Fuel Cons. [MT] (ME Cons 3)",
+        "Time Shift",
+        "Average Load [%]",
         "A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)",
         "A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)",
         "A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)",
         "A.E. 4 Total [Rhrs] (Aux Engine Unit 4)",
         "A.E. 5 Last Report [Rhrs] (Aux Engine Unit 5)",
         "A.E. 6 Last Report [Rhrs] (Aux Engine Unit 6)",
-    ]
-    sub_cols = [
         "Tank Cleaning [MT]",
         "Cargo Transfer [MT]",
         "Maintaining Cargo Temp. [MT]",
@@ -53,83 +101,137 @@ def apply_aux_engine_rule(df):
         "Ballast Transfer [MT]",
         "Fresh Water Prod. [MT]",
         "Others [MT]",
-        "EGCS Consumption [MT]",
-    ]
-    for c in ae_cols + sub_cols + ["Average Load [%]", "Report Hours", "Report Type", "Reason"]:
-        if c not in df.columns:
-            df[c] = 0
-    df[ae_cols + sub_cols] = df[ae_cols + sub_cols].apply(pd.to_numeric, errors="coerce").fillna(0)
-    df["Average Load [%]"] = pd.to_numeric(df["Average Load [%]"], errors="coerce").fillna(0)
-    df["Report Hours"] = pd.to_numeric(df["Report Hours"], errors="coerce").fillna(0)
-    df["AE_Total_Rhrs"] = df[ae_cols].sum(axis=1)
-    df["Sub_Consumption_Total"] = df[sub_cols].sum(axis=1)
-    cond = (
-        df["Report Type"].astype(str).eq("At Sea")
-        & (df["Report Hours"] > 0)
-        & ((df["AE_Total_Rhrs"] / df["Report Hours"]) > 1.25)
-        & (df["Average Load [%]"] > 40)
-        & (df["Sub_Consumption_Total"] == 0)
-    )
-    aux_msg = (
-        "Two or more Aux Engines running at sea with ME Load > 40% and no sub-consumers reported. "
-        "Please confirm operations and update relevant sub-consumption fields if applicable."
-    )
-    df.loc[cond, "Reason"] = df.loc[cond, "Reason"].astype(str).apply(
-        lambda x: (x + "; " + aux_msg).strip("; ").strip()
-    )
-    return df
-
-
-# ---------------------- Validation Logic ----------------------
-def validate_reports(df):
-    numeric_cols = [
-        "Average Load [kW]",
-        "ME Rhrs (From Last Report)",
-        "Avg. Speed",
-        "Fuel Cons. [MT] (ME Cons 1)",
-        "Fuel Cons. [MT] (ME Cons 2)",
-        "Fuel Cons. [MT] (ME Cons 3)",
-        "Time Shift",
+        "EGCS Consumption [MT]"
     ]
     for col in numeric_cols:
         if col in df.columns:
-            df[col] = df[col].astype(str).str.replace(",", "").replace(["", "nan"], np.nan)
+            df[col] = (
+                df[col]
+                .astype(str)
+                .str.replace(",", "")
+                .str.strip()
+                .replace(["", "nan", "None"], np.nan)
+            )
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    # --- Calculate Report Hours ---
     df["Report Hours"] = calculate_report_hours(df)
 
-    numerator = (
-        df.get("Fuel Cons. [MT] (ME Cons 1)", 0)
-        + df.get("Fuel Cons. [MT] (ME Cons 2)", 0)
-        + df.get("Fuel Cons. [MT] (ME Cons 3)", 0)
-    ) * 1_000_000
-    denom = (
-        df.get("Average Load [kW]", 0).replace(0, np.nan)
-        * df.get("ME Rhrs (From Last Report)", 0).replace(0, np.nan)
+    # --- Calculate SFOC in g/kWh ---
+    df["SFOC"] = (
+        (
+            df["Fuel Cons. [MT] (ME Cons 1)"]
+            + df["Fuel Cons. [MT] (ME Cons 2)"]
+            + df["Fuel Cons. [MT] (ME Cons 3)"]
+        )
+        * 1_000_000
+        / (df["Average Load [kW]"].replace(0, np.nan)
+           * df["ME Rhrs (From Last Report)"].replace(0, np.nan))
     )
-    df["SFOC"] = (numerator / denom).fillna(0)
+    df["SFOC"] = df["SFOC"].fillna(0)
 
     reasons = []
-    for _, row in df.iterrows():
+    fail_columns = set()
+
+    for idx, row in df.iterrows():
         reason = []
-        rpt_type = str(row.get("Report Type", "")).strip()
+        report_type = str(row.get("Report Type", "")).strip()
         ME_Rhrs = row.get("ME Rhrs (From Last Report)", 0)
-        rpt_hrs = row.get("Report Hours", 0)
+        report_hours = row.get("Report Hours", 0)
         sfoc = row.get("SFOC", 0)
         avg_speed = row.get("Avg. Speed", 0)
-        if rpt_type == "At Sea" and ME_Rhrs > 12 and not (150 <= sfoc <= 200):
-            reason.append("SFOC out of 150–200 at sea with ME Rhrs > 12")
-        if rpt_type == "At Sea" and ME_Rhrs > 12 and not (0 <= avg_speed <= 20):
-            reason.append("Avg. Speed out of 0–20 at sea with ME Rhrs > 12")
-        if rpt_hrs > 0 and (ME_Rhrs - rpt_hrs) > 1:
-            reason.append(
-                f"ME Rhrs ({ME_Rhrs:.2f}) exceeds Report Hours ({rpt_hrs:.2f}) by {(ME_Rhrs - rpt_hrs):.2f}h"
-            )
-        reasons.append("; ".join(reason))
-    df["Reason"] = reasons
-    df = apply_aux_engine_rule(df)
 
-    # Only these columns for failed table
-    cols_to_keep = [
+        # --- Rule 1: SFOC (only for At Sea) ---
+        if report_type == "At Sea" and ME_Rhrs > 12:
+            if not (150 <= sfoc <= 200):
+                reason.append("SFOC out of 150-200 at sea with ME Rhrs > 12")
+                fail_columns.add("SFOC")
+
+        # --- Rule 2: Avg Speed (only for At Sea) ---
+        if report_type == "At Sea" and ME_Rhrs > 12:
+            if not (0 <= avg_speed <= 20):
+                reason.append("Avg. Speed out of 0-20 at sea with ME Rhrs > 12")
+                fail_columns.add("Avg. Speed")
+
+        # --- Rule 3: Exhaust Temp deviation (Units 1-16, only At Sea) ---
+        if report_type == "At Sea" and ME_Rhrs > 12:
+            exhaust_cols = [
+                f"Exh. Temp [°C] (Main Engine Unit {j})"
+                for j in range(1, 17)
+                if f"Exh. Temp [°C] (Main Engine Unit {j})" in df.columns
+            ]
+            temps = [row[c] for c in exhaust_cols if pd.notna(row[c]) and row[c] != 0]
+            if temps:
+                avg_temp = np.mean(temps)
+                for j, c in enumerate(exhaust_cols, start=1):
+                    val = row[c]
+                    if pd.notna(val) and val != 0 and abs(val - avg_temp) > 50:
+                        reason.append(f"Exhaust temp deviation > ±50 from avg at Unit {j}")
+                        fail_columns.add(c)
+
+        # --- Rule 4: ME Rhrs should not exceed Report Hours (with ±1 hour margin) ---
+        if report_hours > 0:
+            hours_diff = ME_Rhrs - report_hours
+            if hours_diff > 1.0:
+                reason.append(f"ME Rhrs ({ME_Rhrs:.2f}) exceeds Report Hours ({report_hours:.2f}) by {hours_diff:.2f}h (margin: ±1h)")
+                fail_columns.add("ME Rhrs (From Last Report)")
+                fail_columns.add("Report Hours")
+
+        # --- Rule 5: Multiple Aux Engines operating at sea without sub-consumers ---
+        if report_type == "At Sea" and row.get("Average Load [%]", 0) > 40:
+            # Sum all auxiliary engine running hours
+            ae_rhrs_sum = (
+                row.get("A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)", 0) +
+                row.get("A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)", 0) +
+                row.get("A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)", 0) +
+                row.get("A.E. 4 Total [Rhrs] (Aux Engine Unit 4)", 0) +
+                row.get("A.E. 5 Last Report [Rhrs] (Aux Engine Unit 5)", 0) +
+                row.get("A.E. 6 Last Report [Rhrs] (Aux Engine Unit 6)", 0)
+            )
+            
+            # Calculate AE running hours ratio
+            if report_hours > 0:
+                ae_ratio = ae_rhrs_sum / report_hours
+            else:
+                ae_ratio = 0
+            
+            # Sum all sub-consumers
+            sub_consumers_sum = (
+                row.get("Tank Cleaning [MT]", 0) +
+                row.get("Cargo Transfer [MT]", 0) +
+                row.get("Maintaining Cargo Temp. [MT]", 0) +
+                row.get("Shaft Gen. Propulsion [MT]", 0) +
+                row.get("Raising Cargo Temp. [MT]", 0) +
+                row.get("Burning Sludge [MT]", 0) +
+                row.get("Ballast Transfer [MT]", 0) +
+                row.get("Fresh Water Prod. [MT]", 0) +
+                row.get("Others [MT]", 0) +
+                row.get("EGCS Consumption [MT]", 0)
+            )
+            
+            # Check if 2+ Aux Engines operating (ratio > 1.25) with ME Load > 40% and no sub-consumers
+            if ae_ratio > 1.25 and sub_consumers_sum == 0:
+                reason.append(f"Multiple Aux Engines operating at sea (AE Rhrs/Report Hours = {ae_ratio:.2f}) with ME Load > 40% but no sub-consumers reported. Please confirm operations and update sub-consumption fields if applicable")
+                fail_columns.add("Average Load [%]")
+                fail_columns.add("A.E. 1 Last Report [Rhrs] (Aux Engine Unit 1)")
+                fail_columns.add("A.E. 2 Last Report [Rhrs] (Aux Engine Unit 2)")
+                fail_columns.add("A.E. 3 Last Report [Rhrs] (Aux Engine Unit 3)")
+                fail_columns.add("Tank Cleaning [MT]")
+                fail_columns.add("Cargo Transfer [MT]")
+
+        reasons.append("; ".join(reason))
+
+    df["Reason"] = reasons
+    failed = df[df["Reason"] != ""].copy()
+
+    # --- Always include Ship Name and Exhaust Temp columns ---
+    exhaust_cols = [
+        f"Exh. Temp [°C] (Main Engine Unit {j})"
+        for j in range(1, 17)
+        if f"Exh. Temp [°C] (Main Engine Unit {j})" in df.columns
+    ]
+
+    context_cols = [
         "Ship Name",
         "IMO_No",
         "Report Type",
@@ -148,152 +250,559 @@ def validate_reports(df):
         "ME Rhrs (From Last Report)",
         "Report Hours",
     ]
-    for i in range(1, 17):
-        col = f"Exh. Temp [°C] (Main Engine Unit {i})"
-        if col in df.columns:
-            cols_to_keep.append(col)
-    cols_to_keep += ["SFOC", "Reason"]
-    failed = df[df["Reason"].astype(str).str.strip() != ""].copy()
-    failed = failed[[c for c in cols_to_keep if c in failed.columns]]
+
+    # Combine all columns and remove duplicates while preserving order
+    cols_to_keep = context_cols + exhaust_cols + list(fail_columns) + ["Reason"]
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    cols_to_keep_unique = []
+    for col in cols_to_keep:
+        if col not in seen and col in failed.columns:
+            seen.add(col)
+            cols_to_keep_unique.append(col)
+    
+    # Move Ship Name to Column A
+    if "Ship Name" in cols_to_keep_unique:
+        cols_to_keep_unique.remove("Ship Name")
+        cols_to_keep_unique = ["Ship Name"] + cols_to_keep_unique
+
+    failed = failed[cols_to_keep_unique]
+
     return failed, df
 
 
-# ---------------------- Cache Wrapper ----------------------
-@st.cache_data
-def run_validation(uploaded_bytes):
-    df = pd.read_excel(io.BytesIO(uploaded_bytes), sheet_name="All Reports")
-    failed, df_with_calcs = validate_reports(df)
-    return failed, df_with_calcs
-
-
-# ---------------------- Email Utilities ----------------------
-def send_email(smtp_server, smtp_port, sender_email, sender_password, to, subject, body, attachment, filename, cc=None):
+def send_email(smtp_server, smtp_port, sender_email, sender_password, 
+               recipient_emails, subject, body, attachment_data=None, 
+               attachment_name="Failed_Validation.xlsx", cc_emails=None):
+    """Send email with optional attachment to multiple recipients"""
     try:
         msg = MIMEMultipart()
-        msg["From"] = sender_email
-        msg["To"] = to
-        if cc:
-            msg["Cc"] = cc
-        msg["Subject"] = subject
-        msg.attach(MIMEText(body, "html"))
-        if attachment:
-            part = MIMEBase("application", "octet-stream")
-            part.set_payload(attachment.getvalue())
+        msg['From'] = sender_email
+        
+        # Handle recipient emails
+        if isinstance(recipient_emails, str):
+            recipient_list = [email.strip() for email in recipient_emails.split(',') if email.strip()]
+        else:
+            recipient_list = recipient_emails
+        
+        msg['To'] = ', '.join(recipient_list)
+        
+        # Handle CC emails
+        cc_list = []
+        if cc_emails:
+            if isinstance(cc_emails, str):
+                cc_list = [email.strip() for email in cc_emails.split(',') if email.strip()]
+            else:
+                cc_list = cc_emails
+            if cc_list:
+                msg['Cc'] = ', '.join(cc_list)
+        
+        msg['Subject'] = subject
+        
+        msg.attach(MIMEText(body, 'html'))
+        
+        # Attach file if provided
+        if attachment_data:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(attachment_data.getvalue())
             encoders.encode_base64(part)
-            part.add_header("Content-Disposition", f"attachment; filename={filename}")
+            part.add_header('Content-Disposition', f'attachment; filename={attachment_name}')
             msg.attach(part)
-        recipients = to.split(",") + (cc.split(",") if cc else [])
+        
+        # Combine To and CC for actual sending
+        all_recipients = recipient_list + cc_list
+        
+        # Connect and send
         server = smtplib.SMTP(smtp_server, smtp_port)
         server.starttls()
         server.login(sender_email, sender_password)
-        server.sendmail(sender_email, recipients, msg.as_string())
+        server.sendmail(sender_email, all_recipients, msg.as_string())
         server.quit()
+        
         return True, "Email sent successfully!"
     except Exception as e:
-        return False, str(e)
+        return False, f"Failed to send email: {str(e)}"
 
 
-# ---------------------- Streamlit App ----------------------
+def create_email_body(ship_name, failed_count, reasons_summary):
+    """Create HTML email body"""
+    body = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+            <h2 style="color: #2c3e50;">Vessel Report Validation Alert</h2>
+            
+            <p>Dear Captain and C/E of <strong>{ship_name}</strong>,</p>
+            
+            <p>This is an automated notification regarding recent validation failures in your vessel reports.</p>
+            
+            <div style="background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 15px; margin: 20px 0;">
+                <h3 style="margin-top: 0; color: #856404;">Validation Summary</h3>
+                <p><strong>Failed Reports:</strong> {failed_count}</p>
+            </div>
+            
+            <h3>Common Issues Detected:</h3>
+            <ul>
+    {reasons_summary}
+            </ul>
+            
+            <p>Please review the attached Excel file for detailed information about the failed validations.</p>
+            
+            <h4 style="color: #2c3e50;">Action Required:</h4>
+            <ol>
+                <li>Review the attached report carefully</li>
+                <li>Correct the identified issues</li>
+                <li>Resubmit corrected reports</li>
+                <li>Contact the technical team if you need assistance</li>
+            </ol>
+            
+            <hr style="border: none; border-top: 1px solid #ddd; margin: 30px 0;">
+            
+            <p style="color: #7f8c8d; font-size: 0.9em;">
+                For any queries, please contact us at <strong><a href="mailto:smartapp@enginelink.blue">smartapp@enginelink.blue</a></strong>
+            </p>
+            
+            <p style="color: #7f8c8d; font-size: 0.85em; margin-top: 10px;">
+                This is an automated message. Generated on {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}
+            </p>
+        </body>
+    </html>
+    """
+    return body
+
+@st.cache_data
+def process_excel_file(file_bytes, file_name):
+    """Process uploaded Excel file and return validation results"""
+    df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="All Reports")
+    failed, df_with_calcs = validate_reports(df.copy())
+    return df, failed, df_with_calcs
+
+
 def main():
-    st.set_page_config(page_title="Ship Report Validation System", layout="wide")
+    st.set_page_config(
+        page_title="Ship Report Validator",
+        page_icon="🚢",
+        layout="wide"
+    )
+    
+    # Initialize session state
+    if 'validation_done' not in st.session_state:
+        st.session_state.validation_done = False
+    if 'failed_df' not in st.session_state:
+        st.session_state.failed_df = None
+    if 'df_with_calcs' not in st.session_state:
+        st.session_state.df_with_calcs = None
+    if 'original_df' not in st.session_state:
+        st.session_state.original_df = None
+    
     st.title("🚢 Ship Report Validation System")
-
+    st.markdown("Upload your Excel file to validate ship reports and send automated alerts")
+    
+    # Sidebar with validation rules and email settings
     with st.sidebar:
-        st.header("📘 Validation Rules")
+        st.header("📋 Validation Rules")
         st.markdown("""
-**Rule 1: SFOC (Specific Fuel Oil Consumption)**  
-- At Sea (ME Rhrs > 12): 150–200 g/kWh  
-- At Port/Anchorage: No validation  
-
-**Rule 2: Average Speed**  
-- At Sea (ME Rhrs > 12): 0–20 knots  
-
-**Rule 3: Exhaust Temperature**  
-- ±50°C deviation at sea with ME Rhrs > 12  
-
-**Rule 4: ME Running Hours**  
-- ME Rhrs must not exceed Report Hours by >1 hour  
-
-**Rule 5: Aux Engine Operation**  
-- (Sum AE Rhrs / Report Hours) > 1.25 and ME Load > 40% and no sub-consumers  
-""")
+        **Rule 1: SFOC (Specific Fuel Oil Consumption)**
+        - At Sea (ME Rhrs > 12): 150–200 g/kWh
+        - At Port/Anchorage: No validation
+        
+        **Rule 2: Average Speed**
+        - At Sea (ME Rhrs > 12): 0–20 knots
+        - At Port/Anchorage: No validation
+        
+        **Rule 3: Exhaust Temperature**
+        - At Sea (ME Rhrs > 12): Deviation ≤ ±50°C from average
+        - Applies to Units 1-16
+        - At Port/Anchorage: No validation
+        
+        **Rule 4: ME Running Hours**
+        - ME Rhrs must not exceed Report Hours by more than 1 hour
+        - Tolerance: ±1 hour margin
+        
+        **Rule 5: Auxiliary Engines & Sub-Consumers**
+        - At Sea with ME Load > 40%
+        - If AE Rhrs/Report Hours > 1.25 (indicating 2+ AEs running)
+        - All sub-consumers must not be zero
+        - Validates proper reporting of tank cleaning, cargo operations, etc.
+        
+        **Report Hours Calculation**
+        - Calculated as: (End Date/Time - Start Date/Time) + Time Shift
+        """)
+        
         st.divider()
+        
         st.header("📧 Email Configuration")
-        smtp_server = st.text_input("SMTP Server", "smtp.gmail.com")
-        smtp_port = st.number_input("SMTP Port", 587)
-        sender_email = st.text_input("Sender Email")
-        sender_password = st.text_input("App Password", type="password")
-
-    uploaded_file = st.file_uploader("Upload Excel File (sheet: All Reports)", type=["xlsx", "xls"])
-    if not uploaded_file:
-        st.info("Please upload a valid Excel file to continue.")
-        return
-
-    # Cached validation
-    failed, df_with_calcs = run_validation(uploaded_file.getvalue())
-
-    total_reports = len(df_with_calcs)
-    failed_count = len(failed)
-    pass_rate = round(((total_reports - failed_count) / total_reports * 100), 2) if total_reports else 0
-
-    st.markdown("### 📊 Validation Results")
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Reports", total_reports)
-    c2.metric("Failed Reports", failed_count)
-    c3.metric("Pass Rate", f"{pass_rate}%")
-
-    if failed.empty:
-        st.success("🎉 All reports passed validation!")
-        return
-
-    st.warning(f"{failed_count} reports failed validation.")
-
-    # Highlight failed rows
-    def highlight_all(row):
-        return ["background-color: #f8d7da; color: black"] * len(row)
-
-    st.dataframe(failed.style.apply(highlight_all, axis=1), use_container_width=True)
-
-    # Download buttons
-    col1, col2 = st.columns(2)
-    with col1:
-        buffer_failed = io.BytesIO()
-        with pd.ExcelWriter(buffer_failed, engine="openpyxl") as writer:
-            failed.to_excel(writer, index=False)
-        buffer_failed.seek(0)
-        st.download_button("📥 Download Failed Reports", buffer_failed, "Failed_Validation.xlsx")
-
-    with col2:
-        buffer_all = io.BytesIO()
-        with pd.ExcelWriter(buffer_all, engine="openpyxl") as writer:
-            df_with_calcs.to_excel(writer, index=False)
-        buffer_all.seek(0)
-        st.download_button("📥 Download All Data (With Calculations)", buffer_all, "All_Data_Calculated.xlsx")
-
-    st.markdown("---")
-
-    # Individual Email
-    st.subheader("📧 Send Email to Specific Vessel")
-    vessels = failed["Ship Name"].unique().tolist()
-    selected = st.selectbox("Select Vessel", vessels)
-    to_email = st.text_input("To Email(s)")
-    cc_email = st.text_input("CC Email(s)", "")
-    if st.button("Send Email to Selected Vessel"):
-        vessel_failed = failed[failed["Ship Name"] == selected]
-        subject = f"Vessel Report Validation Alert - {selected}"
-        body = f"<p>Dear Team,<br><br>{len(vessel_failed)} failed report(s) for {selected}.<br>Please check the attached file.</p>"
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
-            vessel_failed.to_excel(writer, index=False)
-        buffer.seek(0)
-        success, msg = send_email(
-            smtp_server, smtp_port, sender_email, sender_password,
-            to_email, subject, body, buffer, f"{selected}_Failed.xlsx", cc_email
-        )
-        if success:
-            st.success(msg)
+        with st.expander("SMTP Settings", expanded=False):
+            smtp_server = st.text_input("SMTP Server", value="smtp.gmail.com", 
+                                       help="e.g., smtp.gmail.com, smtp.office365.com")
+            smtp_port = st.number_input("SMTP Port", value=587, min_value=1, max_value=65535)
+            sender_email = st.text_input("Sender Email", placeholder="your-email@company.com")
+            sender_password = st.text_input("Password", type="password", 
+                                           help="Use App Password for Gmail")
+    
+    # File uploader
+    uploaded_file = st.file_uploader(
+        "Choose an Excel file",
+        type=["xlsx", "xls"],
+        help="Upload the weekly data dump Excel file"
+    )
+    
+    # Reset validation when new file is uploaded
+    if uploaded_file is not None:
+        # Create a unique identifier for the file
+        file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+        
+        # Check if this is a new file
+        if 'current_file_id' not in st.session_state or st.session_state.current_file_id != file_id:
+            st.session_state.current_file_id = file_id
+            st.session_state.validation_done = False
+            st.session_state.failed_df = None
+            st.session_state.df_with_calcs = None
+            st.session_state.original_df = None
+    
+    # Run validation only once when file is uploaded
+    if uploaded_file is not None and not st.session_state.validation_done:
+        try:
+            # Read Excel file
+            with st.spinner("Loading and validating file..."):
+                df = pd.read_excel(uploaded_file, sheet_name="All Reports")
+                st.session_state.original_df = df
+                
+                # Validate reports
+                failed, df_with_calcs = validate_reports(df.copy())
+                
+                # Store in session state
+                st.session_state.failed_df = failed
+                st.session_state.df_with_calcs = df_with_calcs
+                st.session_state.validation_done = True
+            
+            st.success(f"✅ File loaded and validated! Total rows: {len(df)}")
+            
+        except Exception as e:
+            st.error(f"❌ Error processing file: {str(e)}")
+            st.exception(e)
+    
+    # Display results if validation is done
+    if st.session_state.validation_done:
+        df = st.session_state.original_df
+        failed = st.session_state.failed_df
+        df_with_calcs = st.session_state.df_with_calcs
+        
+        # Show column info
+        with st.expander("📊 Dataset Information"):
+            st.write(f"**Rows:** {len(df)}")
+            st.write(f"**Columns:** {len(df.columns)}")
+            st.write("**Column Names:**")
+            st.write(df.columns.tolist())
+        
+        # Display results
+        st.header("📈 Validation Results")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Reports", len(df))
+        with col2:
+            st.metric("Failed Reports", len(failed))
+        with col3:
+            pass_rate = ((len(df) - len(failed)) / len(df) * 100) if len(df) > 0 else 0
+            st.metric("Pass Rate", f"{pass_rate:.1f}%")
+        
+        if not failed.empty:
+            st.warning(f"⚠️ {len(failed)} reports failed validation")
+            
+            # Show failed reports
+            st.subheader("Failed Reports")
+            st.dataframe(failed, use_container_width=True, height=400)
+            
+            # Failure reasons summary
+            with st.expander("📊 Failure Reasons Summary"):
+                reasons_list = []
+                for reason_str in failed["Reason"]:
+                    if reason_str:
+                        reasons_list.extend(reason_str.split("; "))
+                
+                if reasons_list:
+                    reason_counts = pd.Series(reasons_list).value_counts()
+                    st.bar_chart(reason_counts)
+                    st.write(reason_counts)
+            
+            # Create Excel file for download/email
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                failed.to_excel(writer, index=False, sheet_name="Failed_Validation")
+            output.seek(0)
+            
+            # Download button
+            st.download_button(
+                label="📥 Download Failed Reports",
+                data=output,
+                file_name="Failed_Validation.xlsx",
+                mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
+            )
+            
+            # Email Section
+            st.divider()
+            st.header("📧 Send Email Notifications")
+            
+            # Get unique vessels
+            if "Ship Name" in failed.columns:
+                vessels = failed["Ship Name"].unique()
+                
+                tab1, tab2 = st.tabs(["📤 Send to Specific Vessels", "📨 Bulk Send to All"])
+                
+                with tab1:
+                    st.markdown("### Send validation report to specific vessels")
+                    
+                    selected_vessel = st.selectbox("Select Vessel", vessels)
+                    
+                    st.markdown("**Recipient Emails** (comma-separated for multiple)")
+                    vessel_email = st.text_area("To:", 
+                                                 placeholder="vessel1@company.com, vessel2@company.com",
+                                                 key="single_vessel_email",
+                                                 height=80)
+                    
+                    st.markdown("**CC Emails** (optional, comma-separated)")
+                    vessel_cc = st.text_area("CC:", 
+                                              placeholder="manager@company.com, office@company.com",
+                                              key="single_vessel_cc",
+                                              height=80)
+                    
+                    if st.button("📤 Send Email to Selected Vessel", type="primary"):
+                        if not sender_email or not sender_password:
+                            st.error("Please configure SMTP settings in the sidebar")
+                        elif not vessel_email:
+                            st.error("Please enter at least one recipient email address")
+                        else:
+                            # Filter failed reports for this vessel
+                            vessel_failed = failed[failed["Ship Name"] == selected_vessel]
+                            
+                            # Create vessel-specific Excel
+                            vessel_output = io.BytesIO()
+                            with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
+                                vessel_failed.to_excel(writer, index=False, 
+                                                      sheet_name="Failed_Validation")
+                            vessel_output.seek(0)
+                            
+                            # Prepare reasons summary
+                            vessel_reasons = []
+                            for reason_str in vessel_failed["Reason"]:
+                                if reason_str:
+                                    vessel_reasons.extend(reason_str.split("; "))
+                            
+                            reasons_html = ""
+                            if vessel_reasons:
+                                reason_counts = pd.Series(vessel_reasons).value_counts()
+                                for reason, count in reason_counts.items():
+                                    reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
+                            
+                            # Create email
+                            subject = f"Vessel Report Validation Alert - {selected_vessel}"
+                            body = create_email_body(selected_vessel, len(vessel_failed), reasons_html)
+                            
+                            with st.spinner("Sending email..."):
+                                success, message = send_email(
+                                    smtp_server, smtp_port, sender_email, sender_password,
+                                    vessel_email, subject, body, vessel_output,
+                                    f"Failed_Validation_{selected_vessel}.xlsx",
+                                    cc_emails=vessel_cc if vessel_cc else None
+                                )
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                            else:
+                                st.error(f"❌ {message}")
+                
+                with tab2:
+                    st.markdown("### Send validation reports to all vessels with failures")
+                    
+                    st.info(f"📊 {len(vessels)} vessel(s) have validation failures")
+                    
+                    # Upload vessel email mapping
+                    email_mapping_file = st.file_uploader(
+                        "Upload Vessel Email Mapping (Excel/CSV)",
+                        type=["xlsx", "xls", "csv"],
+                        help="File should have columns: 'Ship Name', 'Email' (or 'To'), and optionally 'CC1', 'CC2', 'CC3', etc.",
+                        key="email_mapping"
+                    )
+                    
+                    if email_mapping_file:
+                        try:
+                            if email_mapping_file.name.endswith('.csv'):
+                                email_df = pd.read_csv(email_mapping_file)
+                            else:
+                                email_df = pd.read_excel(email_mapping_file)
+                            
+                            st.success(f"✅ Loaded {len(email_df)} vessel email mappings")
+                            st.dataframe(email_df.head(), use_container_width=True)
+                            
+                            # Check for required columns
+                            if "Ship Name" not in email_df.columns:
+                                st.error("❌ Email mapping file must have 'Ship Name' column")
+                            elif "Email" not in email_df.columns and "To" not in email_df.columns:
+                                st.error("❌ Email mapping file must have 'Email' or 'To' column")
+                            else:
+                                # Determine the email column name
+                                email_col = "Email" if "Email" in email_df.columns else "To"
+                                
+                                # Detect CC columns
+                                cc_columns = [col for col in email_df.columns if col.upper().startswith('CC')]
+                                if cc_columns:
+                                    st.info(f"📧 Found CC columns: {', '.join(cc_columns)}")
+                                
+                                if st.button("📨 Send Emails to All Vessels", type="primary"):
+                                    if not sender_email or not sender_password:
+                                        st.error("Please configure SMTP settings in the sidebar")
+                                    else:
+                                        progress_bar = st.progress(0)
+                                        status_container = st.container()
+                                        
+                                        results = []
+                                        for idx, vessel in enumerate(vessels):
+                                            # Get vessel email row
+                                            vessel_email_row = email_df[email_df["Ship Name"] == vessel]
+                                            
+                                            if vessel_email_row.empty:
+                                                results.append(f"❌ {vessel}: No email found in mapping")
+                                                continue
+                                            
+                                            # Get primary email(s)
+                                            vessel_email = vessel_email_row.iloc[0][email_col]
+                                            
+                                            # Skip if no email
+                                            if pd.isna(vessel_email) or str(vessel_email).strip() == "":
+                                                results.append(f"❌ {vessel}: Email is empty")
+                                                continue
+                                            
+                                            # Collect all CC emails from CC columns
+                                            cc_emails_list = []
+                                            for cc_col in cc_columns:
+                                                cc_val = vessel_email_row.iloc[0].get(cc_col)
+                                                if pd.notna(cc_val) and str(cc_val).strip():
+                                                    cc_emails_list.extend([e.strip() for e in str(cc_val).split(',') if e.strip()])
+                                            
+                                            # Combine CC emails
+                                            cc_emails_str = ', '.join(cc_emails_list) if cc_emails_list else None
+                                            
+                                            # Filter and create report
+                                            vessel_failed = failed[failed["Ship Name"] == vessel]
+                                            vessel_output = io.BytesIO()
+                                            with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
+                                                vessel_failed.to_excel(writer, index=False, 
+                                                                      sheet_name="Failed_Validation")
+                                            vessel_output.seek(0)
+                                            
+                                            # Prepare reasons
+                                            vessel_reasons = []
+                                            for reason_str in vessel_failed["Reason"]:
+                                                if reason_str:
+                                                    vessel_reasons.extend(reason_str.split("; "))
+                                            
+                                            reasons_html = ""
+                                            if vessel_reasons:
+                                                reason_counts = pd.Series(vessel_reasons).value_counts()
+                                                for reason, count in reason_counts.items():
+                                                    reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
+                                            
+                                            # Send email
+                                            subject = f"Vessel Report Validation Alert - {vessel}"
+                                            body = create_email_body(vessel, len(vessel_failed), reasons_html)
+                                            
+                                            success, message = send_email(
+                                                smtp_server, smtp_port, sender_email, sender_password,
+                                                vessel_email, subject, body, vessel_output,
+                                                f"Failed_Validation_{vessel}.xlsx",
+                                                cc_emails=cc_emails_str
+                                            )
+                                            
+                                            if success:
+                                                cc_info = f" (CC: {len(cc_emails_list)} recipients)" if cc_emails_list else ""
+                                                results.append(f"✅ {vessel}: Email sent successfully{cc_info}")
+                                            else:
+                                                results.append(f"❌ {vessel}: {message}")
+                                            
+                                            progress_bar.progress((idx + 1) / len(vessels))
+                                        
+                                        with status_container:
+                                            st.subheader("Email Sending Results")
+                                            for result in results:
+                                                st.write(result)
+                            
+                        except Exception as e:
+                            st.error(f"Error loading email mapping: {str(e)}")
+                    else:
+                        st.info("👆 Upload a vessel email mapping file to enable bulk sending")
+            else:
+                st.warning("⚠️ 'Ship Name' column not found. Cannot send vessel-specific emails.")
+        
         else:
-            st.error(msg)
+            st.success("🎉 All reports passed validation!")
+            st.balloons()
+        
+        # Option to view all data with SFOC and Report Hours
+        with st.expander("🔍 View All Data (with calculated SFOC and Report Hours)"):
+            st.dataframe(df_with_calcs, use_container_width=True, height=400)
+            
+            # Download all data
+            output_all = io.BytesIO()
+            with pd.ExcelWriter(output_all, engine='openpyxl') as writer:
+                df_with_calcs.to_excel(writer, index=False, sheet_name="All_Reports_Processed")
+            output_all.seek(0)
+            
+            st.download_button(
+                label="📥 Download All Data with Calculations",
+                data=output_all,
+                file_name="All_Reports_With_Calculations.xlsx",
+                mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
+            )
+    
+    elif uploaded_file is None:
+        st.info("👆 Please upload an Excel file to begin validation")
+        
+        # Show sample data structure
+        with st.expander("📄 Expected Data Structure"):
+            st.markdown("""
+            **Main Excel File** should contain a sheet named **"All Reports"** with columns:
+            
+            - Ship Name, IMO_No, Report Type (At Sea / At Port / At Anchorage)
+            - Start Date, Start Time, End Date, End Time, Time Shift
+            - Average Load [kW], ME Rhrs (From Last Report), Avg. Speed
+            - Fuel Cons. [MT] (ME Cons 1, 2, 3)
+            - Exh. Temp [°C] (Main Engine Unit 1-16)
+            - A.E. 1-6 Last Report [Rhrs] (Aux Engine Units)
+            - Sub-consumer fields: Tank Cleaning, Cargo Transfer, etc.
+            
+            **Email Mapping File** (for bulk sending):
+            - Must have columns: `Ship Name` and `Email` (or `To`)
+            - Optional CC columns: `CC1`, `CC2`, `CC3`, etc.
+            - You can add multiple emails in one cell using commas
+            - Example:
+            
+            | Ship Name | Email | CC1 | CC2 |
+            |-----------|-------|-----|-----|
+            | Vessel A  | captain@vessel-a.com, chief@vessel-a.com | manager@company.com | office@company.com |
+            | Vessel B  | vesselb@company.com | supervisor@company.com | admin@company.com |
+            """)
+        
+        with st.expander("📧 Email Setup Guide"):
+            st.markdown("""
+            ### Gmail Setup:
+            1. Enable 2-Factor Authentication on your Google account
+            2. Generate an App Password: [Google App Passwords](https://myaccount.google.com/apppasswords)
+            3. Use these settings:
+               - SMTP Server: `smtp.gmail.com`
+               - SMTP Port: `587`
+               - Your Gmail address as sender
+               - App Password (not your regular password)
+            
+            ### Outlook/Office 365:
+            - SMTP Server: `smtp.office365.com`
+            - SMTP Port: `587`
+            - Use your Office 365 credentials
+            
+            ### Other Email Providers:
+            - Check your email provider's SMTP settings
+            - Most use port 587 with TLS encryption
+            """)
 
 
 if __name__ == "__main__":

@@ -87,7 +87,7 @@ def calculate_report_hours(df):
         tuple(time_shifts)
     )
 
-@st.cache_data
+@st.cache_data(show_spinner=False, hash_funcs={pd.DataFrame: lambda x: x.to_json()})
 def validate_reports(df):
     """Validate ship reports and return failed rows with reasons"""
     df = df.copy()
@@ -386,12 +386,24 @@ def create_email_body(ship_name, failed_count, reasons_summary):
     """
     return body
 
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def process_excel_file(file_bytes, file_name):
     """Process uploaded Excel file and return validation results"""
+    # Convert bytes to dataframe
     df = pd.read_excel(io.BytesIO(file_bytes), sheet_name="All Reports")
-    failed, df_with_calcs = validate_reports(df.copy())
-    return df, failed, df_with_calcs
+    
+    # Validate reports
+    failed, df_with_calcs = validate_reports(df)
+    
+    # Return as dictionaries for better caching
+    return (
+        df.to_dict('records'),
+        df.columns.tolist(),
+        failed.to_dict('records') if not failed.empty else [],
+        failed.columns.tolist() if not failed.empty else [],
+        df_with_calcs.to_dict('records'),
+        df_with_calcs.columns.tolist()
+    )
 
 
 def main():
@@ -485,7 +497,12 @@ def main():
             
             # Process file with caching
             with st.spinner("Loading and validating file..."):
-                df, failed, df_with_calcs = process_excel_file(file_bytes, file_name)
+                df_data, df_cols, failed_data, failed_cols, calc_data, calc_cols = process_excel_file(file_bytes, file_name)
+                
+                # Convert back to DataFrames
+                df = pd.DataFrame(df_data, columns=df_cols)
+                failed = pd.DataFrame(failed_data, columns=failed_cols) if failed_data else pd.DataFrame()
+                df_with_calcs = pd.DataFrame(calc_data, columns=calc_cols)
                 
                 # Store in session state
                 st.session_state.original_df = df
@@ -570,21 +587,25 @@ def main():
                 with tab1:
                     st.markdown("### Send validation report to specific vessels")
                     
-                    selected_vessel = st.selectbox("Select Vessel", vessels)
+                    # Use form to prevent re-runs
+                    with st.form("single_vessel_form"):
+                        selected_vessel = st.selectbox("Select Vessel", vessels)
+                        
+                        st.markdown("**Recipient Emails** (comma-separated for multiple)")
+                        vessel_email = st.text_area("To:", 
+                                                     placeholder="vessel1@company.com, vessel2@company.com",
+                                                     key="single_vessel_email",
+                                                     height=80)
+                        
+                        st.markdown("**CC Emails** (optional, comma-separated)")
+                        vessel_cc = st.text_area("CC:", 
+                                                  placeholder="manager@company.com, office@company.com",
+                                                  key="single_vessel_cc",
+                                                  height=80)
+                        
+                        submit_button = st.form_submit_button("📤 Send Email to Selected Vessel", type="primary")
                     
-                    st.markdown("**Recipient Emails** (comma-separated for multiple)")
-                    vessel_email = st.text_area("To:", 
-                                                 placeholder="vessel1@company.com, vessel2@company.com",
-                                                 key="single_vessel_email",
-                                                 height=80)
-                    
-                    st.markdown("**CC Emails** (optional, comma-separated)")
-                    vessel_cc = st.text_area("CC:", 
-                                              placeholder="manager@company.com, office@company.com",
-                                              key="single_vessel_cc",
-                                              height=80)
-                    
-                    if st.button("📤 Send Email to Selected Vessel", type="primary"):
+                    if submit_button:
                         if not sender_email or not sender_password:
                             st.error("Please configure SMTP settings in the sidebar")
                         elif not vessel_email:

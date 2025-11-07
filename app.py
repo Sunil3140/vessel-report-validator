@@ -10,23 +10,22 @@ from email import encoders
 from datetime import datetime, timedelta
 
 @st.cache_data
-def calculate_report_hours(df):
+def calculate_report_hours_from_data(start_dates, end_dates, start_times, end_times, time_shifts):
     """Calculate Report Hours from Start Date/Time, End Date/Time and Time Shift"""
-    df = df.copy()
     report_hours = []
     
-    for idx, row in df.iterrows():
+    for idx in range(len(start_dates)):
         try:
             # Get date and time components
-            start_date = pd.to_datetime(row.get("Start Date"), errors='coerce')
-            end_date = pd.to_datetime(row.get("End Date"), errors='coerce')
+            start_date = pd.to_datetime(start_dates[idx], errors='coerce')
+            end_date = pd.to_datetime(end_dates[idx], errors='coerce')
             
             # Get time components (handle various formats)
-            start_time = str(row.get("Start Time", "00:00:00")).strip()
-            end_time = str(row.get("End Time", "00:00:00")).strip()
+            start_time = str(start_times[idx] if idx < len(start_times) else "00:00:00").strip()
+            end_time = str(end_times[idx] if idx < len(end_times) else "00:00:00").strip()
             
             # Handle time shift (convert to hours)
-            time_shift = row.get("Time Shift", 0)
+            time_shift = time_shifts[idx] if idx < len(time_shifts) else 0
             if pd.isna(time_shift):
                 time_shift = 0
             else:
@@ -70,6 +69,23 @@ def calculate_report_hours(df):
             report_hours.append(0)
     
     return report_hours
+
+def calculate_report_hours(df):
+    """Calculate Report Hours from Start Date/Time, End Date/Time and Time Shift"""
+    df = df.copy()
+    start_dates = df.get("Start Date", pd.Series([None]*len(df))).tolist()
+    end_dates = df.get("End Date", pd.Series([None]*len(df))).tolist()
+    start_times = df.get("Start Time", pd.Series(["00:00:00"]*len(df))).tolist()
+    end_times = df.get("End Time", pd.Series(["00:00:00"]*len(df))).tolist()
+    time_shifts = df.get("Time Shift", pd.Series([0]*len(df))).tolist()
+    
+    return calculate_report_hours_from_data(
+        tuple(start_dates), 
+        tuple(end_dates), 
+        tuple(start_times), 
+        tuple(end_times), 
+        tuple(time_shifts)
+    )
 
 @st.cache_data
 def validate_reports(df):
@@ -463,15 +479,16 @@ def main():
     # Run validation only once when file is uploaded
     if uploaded_file is not None and not st.session_state.validation_done:
         try:
-            # Read Excel file
+            # Read file bytes for caching
+            file_bytes = uploaded_file.read()
+            file_name = uploaded_file.name
+            
+            # Process file with caching
             with st.spinner("Loading and validating file..."):
-                df = pd.read_excel(uploaded_file, sheet_name="All Reports")
-                st.session_state.original_df = df
-                
-                # Validate reports
-                failed, df_with_calcs = validate_reports(df.copy())
+                df, failed, df_with_calcs = process_excel_file(file_bytes, file_name)
                 
                 # Store in session state
+                st.session_state.original_df = df
                 st.session_state.failed_df = failed
                 st.session_state.df_with_calcs = df_with_calcs
                 st.session_state.validation_done = True

@@ -679,4 +679,53 @@ def main():
                 mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
             )
     
-    elif uploaded_file
+    elif uploaded_file is None:
+        st.info("👆 Please upload an Excel file to begin validation")
+        
+        # Show sample data structure
+        with st.expander("📄 Expected Data Structure"):
+            st.markdown("""
+            **Main Excel File** should contain a sheet named **"All Reports"** with columns:
+            
+            - Ship Name, IMO_No, Report Type (At Sea / At Port / At Anchorage)
+            - Start Date, Start Time, End Date, End Time, Time Shift
+            - Average Load [kW], ME Rhrs (From Last Report), Avg. Speed
+            - Fuel Cons. [MT] (ME Cons 1, 2, 3)
+            - Exh. Temp [°C] (Main Engine Unit 1-16)
+            
+            **Email Mapping File** (for bulk sending):
+            - Must have columns: `Ship Name` and `Email` (or `To`)
+            - Optional CC columns: `CC1`, `CC2`, `CC3`, etc.
+            - You can add multiple emails in one cell using commas
+            - Example:
+            
+            | Ship Name | Email | CC1 | CC2 |
+            |-----------|-------|-----|-----|
+            | Vessel A  | captain@vessel-a.com, chief@vessel-a.com | manager@company.com | office@company.com |
+            | Vessel B  | vesselb@company.com | supervisor@company.com | admin@company.com |
+            """)
+        
+        with st.expander("📧 Email Setup Guide"):
+            st.markdown("""
+            ### Gmail Setup:
+            1. Enable 2-Factor Authentication on your Google account
+            2. Generate an App Password: [Google App Passwords](https://myaccount.google.com/apppasswords)
+            3. Use these settings:
+               - SMTP Server: `smtp.gmail.com`
+               - SMTP Port: `587`
+               - Your Gmail address as sender
+               - App Password (not your regular password)
+            
+            ### Outlook/Office 365:
+            - SMTP Server: `smtp.office365.com`
+            - SMTP Port: `587`
+            - Use your Office 365 credentials
+            
+            ### Other Email Providers:
+            - Check your email provider's SMTP settings
+            - Most use port 587 with TLS encryption
+            """)
+
+
+if __name__ == "__main__":
+    main()

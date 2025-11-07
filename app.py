@@ -150,9 +150,7 @@ def validate_reports(df):
 
         # --- Rule 4: ME Rhrs should not exceed Report Hours (with ±1 hour margin) ---
         if report_hours > 0:
-            # Calculate the difference
             hours_diff = ME_Rhrs - report_hours
-            # Allow +1 hour margin (ME Rhrs can be up to 1 hour more than Report Hours)
             if hours_diff > 1.0:
                 reason.append(f"ME Rhrs ({ME_Rhrs:.2f}) exceeds Report Hours ({report_hours:.2f}) by {hours_diff:.2f}h (margin: ±1h)")
                 fail_columns.add("ME Rhrs (From Last Report)")
@@ -214,12 +212,7 @@ def validate_reports(df):
 def send_email(smtp_server, smtp_port, sender_email, sender_password, 
                recipient_emails, subject, body, attachment_data=None, 
                attachment_name="Failed_Validation.xlsx", cc_emails=None):
-    """Send email with optional attachment to multiple recipients
-    
-    Args:
-        recipient_emails: String of comma-separated emails or list of emails
-        cc_emails: String of comma-separated emails or list of emails for CC
-    """
+    """Send email with optional attachment to multiple recipients"""
     try:
         msg = MIMEMultipart()
         msg['From'] = sender_email
@@ -322,6 +315,16 @@ def main():
         layout="wide"
     )
     
+    # Initialize session state
+    if 'validation_done' not in st.session_state:
+        st.session_state.validation_done = False
+    if 'failed_df' not in st.session_state:
+        st.session_state.failed_df = None
+    if 'df_with_calcs' not in st.session_state:
+        st.session_state.df_with_calcs = None
+    if 'original_df' not in st.session_state:
+        st.session_state.original_df = None
+    
     st.title("🚢 Ship Report Validation System")
     st.markdown("Upload your Excel file to validate ship reports and send automated alerts")
     
@@ -368,336 +371,312 @@ def main():
         help="Upload the weekly data dump Excel file"
     )
     
+    # Reset validation when new file is uploaded
     if uploaded_file is not None:
+        # Create a unique identifier for the file
+        file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+        
+        # Check if this is a new file
+        if 'current_file_id' not in st.session_state or st.session_state.current_file_id != file_id:
+            st.session_state.current_file_id = file_id
+            st.session_state.validation_done = False
+            st.session_state.failed_df = None
+            st.session_state.df_with_calcs = None
+            st.session_state.original_df = None
+    
+    # Run validation only once when file is uploaded
+    if uploaded_file is not None and not st.session_state.validation_done:
         try:
             # Read Excel file
-            with st.spinner("Loading file..."):
+            with st.spinner("Loading and validating file..."):
                 df = pd.read_excel(uploaded_file, sheet_name="All Reports")
-            
-            st.success(f"✅ File loaded successfully! Total rows: {len(df)}")
-            
-            # Show column info
-            with st.expander("📊 Dataset Information"):
-                st.write(f"**Rows:** {len(df)}")
-                st.write(f"**Columns:** {len(df.columns)}")
-                st.write("**Column Names:**")
-                st.write(df.columns.tolist())
-            
-            # Validate reports
-            with st.spinner("Validating reports..."):
+                st.session_state.original_df = df
+                
+                # Validate reports
                 failed, df_with_calcs = validate_reports(df.copy())
+                
+                # Store in session state
+                st.session_state.failed_df = failed
+                st.session_state.df_with_calcs = df_with_calcs
+                st.session_state.validation_done = True
             
-            # Display results
-            st.header("📈 Validation Results")
+            st.success(f"✅ File loaded and validated! Total rows: {len(df)}")
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Reports", len(df))
-            with col2:
-                st.metric("Failed Reports", len(failed))
-            with col3:
-                pass_rate = ((len(df) - len(failed)) / len(df) * 100) if len(df) > 0 else 0
-                st.metric("Pass Rate", f"{pass_rate:.1f}%")
-            
-            if not failed.empty:
-                st.warning(f"⚠️ {len(failed)} reports failed validation")
-                
-                # Show failed reports
-                st.subheader("Failed Reports")
-                st.dataframe(failed, use_container_width=True, height=400)
-                
-                # Failure reasons summary
-                with st.expander("📊 Failure Reasons Summary"):
-                    reasons_list = []
-                    for reason_str in failed["Reason"]:
-                        if reason_str:
-                            reasons_list.extend(reason_str.split("; "))
-                    
-                    if reasons_list:
-                        reason_counts = pd.Series(reasons_list).value_counts()
-                        st.bar_chart(reason_counts)
-                        st.write(reason_counts)
-                
-                # Create Excel file for download/email
-                output = io.BytesIO()
-                with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    failed.to_excel(writer, index=False, sheet_name="Failed_Validation")
-                output.seek(0)
-                
-                # Download button
-                st.download_button(
-                    label="📥 Download Failed Reports",
-                    data=output,
-                    file_name="Failed_Validation.xlsx",
-                    mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
-                )
-                
-                # Email Section
-                st.divider()
-                st.header("📧 Send Email Notifications")
-                
-                # Get unique vessels
-                if "Ship Name" in failed.columns:
-                    vessels = failed["Ship Name"].unique()
-                    
-                    tab1, tab2 = st.tabs(["📤 Send to Specific Vessels", "📨 Bulk Send to All"])
-                    
-                    with tab1:
-                        st.markdown("### Send validation report to specific vessels")
-                        
-                        selected_vessel = st.selectbox("Select Vessel", vessels)
-                        
-                        st.markdown("**Recipient Emails** (comma-separated for multiple)")
-                        vessel_email = st.text_area("To:", 
-                                                     placeholder="vessel1@company.com, vessel2@company.com",
-                                                     key="single_vessel_email",
-                                                     height=80)
-                        
-                        st.markdown("**CC Emails** (optional, comma-separated)")
-                        vessel_cc = st.text_area("CC:", 
-                                                  placeholder="manager@company.com, office@company.com",
-                                                  key="single_vessel_cc",
-                                                  height=80)
-                        
-                        if st.button("📤 Send Email to Selected Vessel", type="primary"):
-                            if not sender_email or not sender_password:
-                                st.error("Please configure SMTP settings in the sidebar")
-                            elif not vessel_email:
-                                st.error("Please enter at least one recipient email address")
-                            else:
-                                # Filter failed reports for this vessel
-                                vessel_failed = failed[failed["Ship Name"] == selected_vessel]
-                                
-                                # Create vessel-specific Excel
-                                vessel_output = io.BytesIO()
-                                with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
-                                    vessel_failed.to_excel(writer, index=False, 
-                                                          sheet_name="Failed_Validation")
-                                vessel_output.seek(0)
-                                
-                                # Prepare reasons summary
-                                vessel_reasons = []
-                                for reason_str in vessel_failed["Reason"]:
-                                    if reason_str:
-                                        vessel_reasons.extend(reason_str.split("; "))
-                                
-                                reasons_html = ""
-                                if vessel_reasons:
-                                    reason_counts = pd.Series(vessel_reasons).value_counts()
-                                    for reason, count in reason_counts.items():
-                                        reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
-                                
-                                # Create email
-                                subject = f"Vessel Report Validation Alert - {selected_vessel}"
-                                body = create_email_body(selected_vessel, len(vessel_failed), reasons_html)
-                                
-                                with st.spinner("Sending email..."):
-                                    success, message = send_email(
-                                        smtp_server, smtp_port, sender_email, sender_password,
-                                        vessel_email, subject, body, vessel_output,
-                                        f"Failed_Validation_{selected_vessel}.xlsx",
-                                        cc_emails=vessel_cc if vessel_cc else None
-                                    )
-                                
-                                if success:
-                                    st.success(f"✅ {message}")
-                                else:
-                                    st.error(f"❌ {message}")
-                    
-                    with tab2:
-                        st.markdown("### Send validation reports to all vessels with failures")
-                        
-                        st.info(f"📊 {len(vessels)} vessel(s) have validation failures")
-                        
-                        # Upload vessel email mapping
-                        email_mapping_file = st.file_uploader(
-                            "Upload Vessel Email Mapping (Excel/CSV)",
-                            type=["xlsx", "xls", "csv"],
-                            help="File should have columns: 'Ship Name', 'Email' (or 'To'), and optionally 'CC1', 'CC2', 'CC3', etc.",
-                            key="email_mapping"
-                        )
-                        
-                        if email_mapping_file:
-                            try:
-                                if email_mapping_file.name.endswith('.csv'):
-                                    email_df = pd.read_csv(email_mapping_file)
-                                else:
-                                    email_df = pd.read_excel(email_mapping_file)
-                                
-                                st.success(f"✅ Loaded {len(email_df)} vessel email mappings")
-                                st.dataframe(email_df.head(), use_container_width=True)
-                                
-                                # Check for required columns
-                                if "Ship Name" not in email_df.columns:
-                                    st.error("❌ Email mapping file must have 'Ship Name' column")
-                                elif "Email" not in email_df.columns and "To" not in email_df.columns:
-                                    st.error("❌ Email mapping file must have 'Email' or 'To' column")
-                                else:
-                                    # Determine the email column name
-                                    email_col = "Email" if "Email" in email_df.columns else "To"
-                                    
-                                    # Detect CC columns
-                                    cc_columns = [col for col in email_df.columns if col.upper().startswith('CC')]
-                                    if cc_columns:
-                                        st.info(f"📧 Found CC columns: {', '.join(cc_columns)}")
-                                    
-                                    if st.button("📨 Send Emails to All Vessels", type="primary"):
-                                        if not sender_email or not sender_password:
-                                            st.error("Please configure SMTP settings in the sidebar")
-                                        else:
-                                            progress_bar = st.progress(0)
-                                            status_container = st.container()
-                                            
-                                            results = []
-                                            for idx, vessel in enumerate(vessels):
-                                                # Get vessel email row
-                                                vessel_email_row = email_df[email_df["Ship Name"] == vessel]
-                                                
-                                                if vessel_email_row.empty:
-                                                    results.append(f"❌ {vessel}: No email found in mapping")
-                                                    continue
-                                                
-                                                # Get primary email(s)
-                                                vessel_email = vessel_email_row.iloc[0][email_col]
-                                                
-                                                # Skip if no email
-                                                if pd.isna(vessel_email) or str(vessel_email).strip() == "":
-                                                    results.append(f"❌ {vessel}: Email is empty")
-                                                    continue
-                                                
-                                                # Collect all CC emails from CC columns
-                                                cc_emails_list = []
-                                                for cc_col in cc_columns:
-                                                    cc_val = vessel_email_row.iloc[0].get(cc_col)
-                                                    if pd.notna(cc_val) and str(cc_val).strip():
-                                                        # Handle multiple emails in one CC column
-                                                        cc_emails_list.extend([e.strip() for e in str(cc_val).split(',') if e.strip()])
-                                                
-                                                # Combine CC emails
-                                                cc_emails_str = ', '.join(cc_emails_list) if cc_emails_list else None
-                                                
-                                                # Filter and create report
-                                                vessel_failed = failed[failed["Ship Name"] == vessel]
-                                                vessel_output = io.BytesIO()
-                                                with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
-                                                    vessel_failed.to_excel(writer, index=False, 
-                                                                          sheet_name="Failed_Validation")
-                                                vessel_output.seek(0)
-                                                
-                                                # Prepare reasons
-                                                vessel_reasons = []
-                                                for reason_str in vessel_failed["Reason"]:
-                                                    if reason_str:
-                                                        vessel_reasons.extend(reason_str.split("; "))
-                                                
-                                                reasons_html = ""
-                                                if vessel_reasons:
-                                                    reason_counts = pd.Series(vessel_reasons).value_counts()
-                                                    for reason, count in reason_counts.items():
-                                                        reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
-                                                
-                                                # Send email
-                                                subject = f"Vessel Report Validation Alert - {vessel}"
-                                                body = create_email_body(vessel, len(vessel_failed), reasons_html)
-                                                
-                                                success, message = send_email(
-                                                    smtp_server, smtp_port, sender_email, sender_password,
-                                                    vessel_email, subject, body, vessel_output,
-                                                    f"Failed_Validation_{vessel}.xlsx",
-                                                    cc_emails=cc_emails_str
-                                                )
-                                                
-                                                if success:
-                                                    cc_info = f" (CC: {len(cc_emails_list)} recipients)" if cc_emails_list else ""
-                                                    results.append(f"✅ {vessel}: Email sent successfully{cc_info}")
-                                                else:
-                                                    results.append(f"❌ {vessel}: {message}")
-                                                
-                                                progress_bar.progress((idx + 1) / len(vessels))
-                                            
-                                            with status_container:
-                                                st.subheader("Email Sending Results")
-                                                for result in results:
-                                                    st.write(result)
-                                
-                            except Exception as e:
-                                st.error(f"Error loading email mapping: {str(e)}")
-                        else:
-                            st.info("👆 Upload a vessel email mapping file to enable bulk sending")
-                else:
-                    st.warning("⚠️ 'Ship Name' column not found. Cannot send vessel-specific emails.")
-            
-            else:
-                st.success("🎉 All reports passed validation!")
-                st.balloons()
-            
-            # Option to view all data with SFOC and Report Hours
-            with st.expander("🔍 View All Data (with calculated SFOC and Report Hours)"):
-                st.dataframe(df_with_calcs, use_container_width=True, height=400)
-                
-                # Download all data
-                output_all = io.BytesIO()
-                with pd.ExcelWriter(output_all, engine='openpyxl') as writer:
-                    df_with_calcs.to_excel(writer, index=False, sheet_name="All_Reports_Processed")
-                output_all.seek(0)
-                
-                st.download_button(
-                    label="📥 Download All Data with Calculations",
-                    data=output_all,
-                    file_name="All_Reports_With_Calculations.xlsx",
-                    mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
-                )
-                
         except Exception as e:
             st.error(f"❌ Error processing file: {str(e)}")
             st.exception(e)
-    else:
-        st.info("👆 Please upload an Excel file to begin validation")
+    
+    # Display results if validation is done
+    if st.session_state.validation_done:
+        df = st.session_state.original_df
+        failed = st.session_state.failed_df
+        df_with_calcs = st.session_state.df_with_calcs
         
-        # Show sample data structure
-        with st.expander("📄 Expected Data Structure"):
-            st.markdown("""
-            **Main Excel File** should contain a sheet named **"All Reports"** with columns:
-            
-            - Ship Name, IMO_No, Report Type (At Sea / At Port / At Anchorage)
-            - Start Date, Start Time, End Date, End Time, Time Shift
-            - Average Load [kW], ME Rhrs (From Last Report), Avg. Speed
-            - Fuel Cons. [MT] (ME Cons 1, 2, 3)
-            - Exh. Temp [°C] (Main Engine Unit 1-16)
-            
-            **Email Mapping File** (for bulk sending):
-            - Must have columns: `Ship Name` and `Email` (or `To`)
-            - Optional CC columns: `CC1`, `CC2`, `CC3`, etc.
-            - You can add multiple emails in one cell using commas
-            - Example:
-            
-            | Ship Name | Email | CC1 | CC2 |
-            |-----------|-------|-----|-----|
-            | Vessel A  | captain@vessel-a.com, chief@vessel-a.com | manager@company.com | office@company.com |
-            | Vessel B  | vesselb@company.com | supervisor@company.com | admin@company.com |
-            """)
+        # Show column info
+        with st.expander("📊 Dataset Information"):
+            st.write(f"**Rows:** {len(df)}")
+            st.write(f"**Columns:** {len(df.columns)}")
+            st.write("**Column Names:**")
+            st.write(df.columns.tolist())
         
-        with st.expander("📧 Email Setup Guide"):
-            st.markdown("""
-            ### Gmail Setup:
-            1. Enable 2-Factor Authentication on your Google account
-            2. Generate an App Password: [Google App Passwords](https://myaccount.google.com/apppasswords)
-            3. Use these settings:
-               - SMTP Server: `smtp.gmail.com`
-               - SMTP Port: `587`
-               - Your Gmail address as sender
-               - App Password (not your regular password)
+        # Display results
+        st.header("📈 Validation Results")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Reports", len(df))
+        with col2:
+            st.metric("Failed Reports", len(failed))
+        with col3:
+            pass_rate = ((len(df) - len(failed)) / len(df) * 100) if len(df) > 0 else 0
+            st.metric("Pass Rate", f"{pass_rate:.1f}%")
+        
+        if not failed.empty:
+            st.warning(f"⚠️ {len(failed)} reports failed validation")
             
-            ### Outlook/Office 365:
-            - SMTP Server: `smtp.office365.com`
-            - SMTP Port: `587`
-            - Use your Office 365 credentials
+            # Show failed reports
+            st.subheader("Failed Reports")
+            st.dataframe(failed, use_container_width=True, height=400)
             
-            ### Other Email Providers:
-            - Check your email provider's SMTP settings
-            - Most use port 587 with TLS encryption
-            """)
-
-
-if __name__ == "__main__":
-    main()
+            # Failure reasons summary
+            with st.expander("📊 Failure Reasons Summary"):
+                reasons_list = []
+                for reason_str in failed["Reason"]:
+                    if reason_str:
+                        reasons_list.extend(reason_str.split("; "))
+                
+                if reasons_list:
+                    reason_counts = pd.Series(reasons_list).value_counts()
+                    st.bar_chart(reason_counts)
+                    st.write(reason_counts)
+            
+            # Create Excel file for download/email
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                failed.to_excel(writer, index=False, sheet_name="Failed_Validation")
+            output.seek(0)
+            
+            # Download button
+            st.download_button(
+                label="📥 Download Failed Reports",
+                data=output,
+                file_name="Failed_Validation.xlsx",
+                mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
+            )
+            
+            # Email Section
+            st.divider()
+            st.header("📧 Send Email Notifications")
+            
+            # Get unique vessels
+            if "Ship Name" in failed.columns:
+                vessels = failed["Ship Name"].unique()
+                
+                tab1, tab2 = st.tabs(["📤 Send to Specific Vessels", "📨 Bulk Send to All"])
+                
+                with tab1:
+                    st.markdown("### Send validation report to specific vessels")
+                    
+                    selected_vessel = st.selectbox("Select Vessel", vessels)
+                    
+                    st.markdown("**Recipient Emails** (comma-separated for multiple)")
+                    vessel_email = st.text_area("To:", 
+                                                 placeholder="vessel1@company.com, vessel2@company.com",
+                                                 key="single_vessel_email",
+                                                 height=80)
+                    
+                    st.markdown("**CC Emails** (optional, comma-separated)")
+                    vessel_cc = st.text_area("CC:", 
+                                              placeholder="manager@company.com, office@company.com",
+                                              key="single_vessel_cc",
+                                              height=80)
+                    
+                    if st.button("📤 Send Email to Selected Vessel", type="primary"):
+                        if not sender_email or not sender_password:
+                            st.error("Please configure SMTP settings in the sidebar")
+                        elif not vessel_email:
+                            st.error("Please enter at least one recipient email address")
+                        else:
+                            # Filter failed reports for this vessel
+                            vessel_failed = failed[failed["Ship Name"] == selected_vessel]
+                            
+                            # Create vessel-specific Excel
+                            vessel_output = io.BytesIO()
+                            with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
+                                vessel_failed.to_excel(writer, index=False, 
+                                                      sheet_name="Failed_Validation")
+                            vessel_output.seek(0)
+                            
+                            # Prepare reasons summary
+                            vessel_reasons = []
+                            for reason_str in vessel_failed["Reason"]:
+                                if reason_str:
+                                    vessel_reasons.extend(reason_str.split("; "))
+                            
+                            reasons_html = ""
+                            if vessel_reasons:
+                                reason_counts = pd.Series(vessel_reasons).value_counts()
+                                for reason, count in reason_counts.items():
+                                    reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
+                            
+                            # Create email
+                            subject = f"Vessel Report Validation Alert - {selected_vessel}"
+                            body = create_email_body(selected_vessel, len(vessel_failed), reasons_html)
+                            
+                            with st.spinner("Sending email..."):
+                                success, message = send_email(
+                                    smtp_server, smtp_port, sender_email, sender_password,
+                                    vessel_email, subject, body, vessel_output,
+                                    f"Failed_Validation_{selected_vessel}.xlsx",
+                                    cc_emails=vessel_cc if vessel_cc else None
+                                )
+                            
+                            if success:
+                                st.success(f"✅ {message}")
+                            else:
+                                st.error(f"❌ {message}")
+                
+                with tab2:
+                    st.markdown("### Send validation reports to all vessels with failures")
+                    
+                    st.info(f"📊 {len(vessels)} vessel(s) have validation failures")
+                    
+                    # Upload vessel email mapping
+                    email_mapping_file = st.file_uploader(
+                        "Upload Vessel Email Mapping (Excel/CSV)",
+                        type=["xlsx", "xls", "csv"],
+                        help="File should have columns: 'Ship Name', 'Email' (or 'To'), and optionally 'CC1', 'CC2', 'CC3', etc.",
+                        key="email_mapping"
+                    )
+                    
+                    if email_mapping_file:
+                        try:
+                            if email_mapping_file.name.endswith('.csv'):
+                                email_df = pd.read_csv(email_mapping_file)
+                            else:
+                                email_df = pd.read_excel(email_mapping_file)
+                            
+                            st.success(f"✅ Loaded {len(email_df)} vessel email mappings")
+                            st.dataframe(email_df.head(), use_container_width=True)
+                            
+                            # Check for required columns
+                            if "Ship Name" not in email_df.columns:
+                                st.error("❌ Email mapping file must have 'Ship Name' column")
+                            elif "Email" not in email_df.columns and "To" not in email_df.columns:
+                                st.error("❌ Email mapping file must have 'Email' or 'To' column")
+                            else:
+                                # Determine the email column name
+                                email_col = "Email" if "Email" in email_df.columns else "To"
+                                
+                                # Detect CC columns
+                                cc_columns = [col for col in email_df.columns if col.upper().startswith('CC')]
+                                if cc_columns:
+                                    st.info(f"📧 Found CC columns: {', '.join(cc_columns)}")
+                                
+                                if st.button("📨 Send Emails to All Vessels", type="primary"):
+                                    if not sender_email or not sender_password:
+                                        st.error("Please configure SMTP settings in the sidebar")
+                                    else:
+                                        progress_bar = st.progress(0)
+                                        status_container = st.container()
+                                        
+                                        results = []
+                                        for idx, vessel in enumerate(vessels):
+                                            # Get vessel email row
+                                            vessel_email_row = email_df[email_df["Ship Name"] == vessel]
+                                            
+                                            if vessel_email_row.empty:
+                                                results.append(f"❌ {vessel}: No email found in mapping")
+                                                continue
+                                            
+                                            # Get primary email(s)
+                                            vessel_email = vessel_email_row.iloc[0][email_col]
+                                            
+                                            # Skip if no email
+                                            if pd.isna(vessel_email) or str(vessel_email).strip() == "":
+                                                results.append(f"❌ {vessel}: Email is empty")
+                                                continue
+                                            
+                                            # Collect all CC emails from CC columns
+                                            cc_emails_list = []
+                                            for cc_col in cc_columns:
+                                                cc_val = vessel_email_row.iloc[0].get(cc_col)
+                                                if pd.notna(cc_val) and str(cc_val).strip():
+                                                    cc_emails_list.extend([e.strip() for e in str(cc_val).split(',') if e.strip()])
+                                            
+                                            # Combine CC emails
+                                            cc_emails_str = ', '.join(cc_emails_list) if cc_emails_list else None
+                                            
+                                            # Filter and create report
+                                            vessel_failed = failed[failed["Ship Name"] == vessel]
+                                            vessel_output = io.BytesIO()
+                                            with pd.ExcelWriter(vessel_output, engine='openpyxl') as writer:
+                                                vessel_failed.to_excel(writer, index=False, 
+                                                                      sheet_name="Failed_Validation")
+                                            vessel_output.seek(0)
+                                            
+                                            # Prepare reasons
+                                            vessel_reasons = []
+                                            for reason_str in vessel_failed["Reason"]:
+                                                if reason_str:
+                                                    vessel_reasons.extend(reason_str.split("; "))
+                                            
+                                            reasons_html = ""
+                                            if vessel_reasons:
+                                                reason_counts = pd.Series(vessel_reasons).value_counts()
+                                                for reason, count in reason_counts.items():
+                                                    reasons_html += f"<li>{reason} ({count} occurrence{'s' if count > 1 else ''})</li>\n"
+                                            
+                                            # Send email
+                                            subject = f"Vessel Report Validation Alert - {vessel}"
+                                            body = create_email_body(vessel, len(vessel_failed), reasons_html)
+                                            
+                                            success, message = send_email(
+                                                smtp_server, smtp_port, sender_email, sender_password,
+                                                vessel_email, subject, body, vessel_output,
+                                                f"Failed_Validation_{vessel}.xlsx",
+                                                cc_emails=cc_emails_str
+                                            )
+                                            
+                                            if success:
+                                                cc_info = f" (CC: {len(cc_emails_list)} recipients)" if cc_emails_list else ""
+                                                results.append(f"✅ {vessel}: Email sent successfully{cc_info}")
+                                            else:
+                                                results.append(f"❌ {vessel}: {message}")
+                                            
+                                            progress_bar.progress((idx + 1) / len(vessels))
+                                        
+                                        with status_container:
+                                            st.subheader("Email Sending Results")
+                                            for result in results:
+                                                st.write(result)
+                            
+                        except Exception as e:
+                            st.error(f"Error loading email mapping: {str(e)}")
+                    else:
+                        st.info("👆 Upload a vessel email mapping file to enable bulk sending")
+            else:
+                st.warning("⚠️ 'Ship Name' column not found. Cannot send vessel-specific emails.")
+        
+        else:
+            st.success("🎉 All reports passed validation!")
+            st.balloons()
+        
+        # Option to view all data with SFOC and Report Hours
+        with st.expander("🔍 View All Data (with calculated SFOC and Report Hours)"):
+            st.dataframe(df_with_calcs, use_container_width=True, height=400)
+            
+            # Download all data
+            output_all = io.BytesIO()
+            with pd.ExcelWriter(output_all, engine='openpyxl') as writer:
+                df_with_calcs.to_excel(writer, index=False, sheet_name="All_Reports_Processed")
+            output_all.seek(0)
+            
+            st.download_button(
+                label="📥 Download All Data with Calculations",
+                data=output_all,
+                file_name="All_Reports_With_Calculations.xlsx",
+                mime="application/vnd.openxmlx-officedocument.spreadsheetml.sheet"
+            )
+    
+    elif uploaded_file
